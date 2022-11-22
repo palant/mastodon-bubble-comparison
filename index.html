@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Compare bubbles of two Mastodon accounts</title>
+
+  <script>
+    "use strict";
+
+    function makeValidUrl(url)
+    {
+      let parsed = new URL(url);
+      if (parsed.protocol == "http:" || parsed.protocol == "https:")
+        return url;
+      else
+        return "https://" + url;
+    }
+
+    function restore()
+    {
+      for (let key of Object.keys(localStorage))
+      {
+        let element = document.getElementById(key);
+        if (element && element.localName == "input")
+          element.value = localStorage[key];
+      }
+    }
+
+    function save(input)
+    {
+      localStorage[input.id] = input.value;
+    }
+
+    function setProgress(text, error = false)
+    {
+      document.getElementById("progress-label").textContent = text;
+      if (error)
+        document.getElementById("progress").classList.add("error");
+      else
+        document.getElementById("progress").classList.remove("error");
+    }
+
+    function setError(text)
+    {
+      setProgress(text, true);
+    }
+
+    function parseAccountName(account)
+    {
+      let parts = account.trim().replace(/^@/, "").split("@");
+      if (parts.length != 2)
+        throw `Unexpected account name ${account}, expected two parts separated by @.`;
+      if (/[:\\/]/.test(parts[1]))
+        throw `Unexpected account name ${account}, host part cannot contain slashes or colons.`;
+      return {
+        user: parts[0].trim(),
+        host: parts[1].trim()
+      };
+    }
+
+    function parseNextLink(link)
+    {
+      for (let entry of String(link).split(/, /))
+      {
+        let match = /^<(.+?)>;\s*rel="next"/.exec(entry.trim());
+        if (match)
+          return makeValidUrl(match[1]);
+      }
+
+      return null;
+    }
+
+    async function apiCall(host, path)
+    {
+      let url = `https://${host}/api/v1/${path}`;
+      let result = null;
+      do
+      {
+        let response = await fetch(url);
+        if (result)
+          result.push(...await response.json());
+        else
+          result = await response.json();
+
+        if (Array.isArray(result))
+          url = parseNextLink(response.headers.get("link"));
+        else
+          url = null;
+      } while (url);
+      return result;
+    }
+
+    async function resolveAccount(account)
+    {
+      let {user, host} = parseAccountName(account);
+      let response;
+      try
+      {
+        response = await fetch(`https://${host}/.well-known/webfinger?resource=acct:${user}@${host}`);
+      }
+      catch (e)
+      {
+        console.error(e);
+        throw `Failed resolving account ${account}, maybe not a Mastodon server?`;
+      }
+       
+      if (response.status == 404)
+        throw `Account ${account} does not exist.`;
+      else if (response.status != 200)
+        throw `Got response ${response.status} resolving account ${account}.`;
+
+      response = await response.json();
+
+      const prefix = "acct:";
+      if (!response.subject || !response.subject.startsWith(prefix))
+        throw `Unexpected response resolving account ${account}`;
+
+      return parseAccountName(response.subject.slice(prefix.length));
+    }
+
+    function listToMap(list)
+    {
+      let map = new Map();
+      for (let account of list)
+        map.set(account.url, account);
+      return map;
+    }
+
+    function compareLists(followees1, followers1, followees2, followers2, account1, account2)
+    {
+      followees1 = listToMap(followees1);
+      followers1 = listToMap(followers1);
+      followees2 = listToMap(followees2);
+      followers2 = listToMap(followers2);
+
+      let seen = new Set();
+      let accepted = [];
+      for (let account of [...followees1.values(), ...followers1.values()])
+      {
+        if (seen.has(account.url))
+          continue;
+        seen.add(account.url);
+
+        if (!followees2.has(account.url) && !followers2.has(account.url))
+          continue;
+
+        let score = 0;
+        let note = [];
+        if (followees1.has(account.url) && followees2.has(account.url))
+        {
+          score += 3;
+          note.push("followed by both");
+        }
+        else if (followees1.has(account.url))
+        {
+          score += 1;
+          note.push(`followed by ${account1}`);
+        }
+        else if (followees2.has(account.url))
+        {
+          score += 1;
+          note.push(`followed by ${account2}`);
+        }
+
+        if (followers1.has(account.url) && followers2.has(account.url))
+        {
+          score += 5;
+          note.push("following both");
+        }
+        else if (followers1.has(account.url))
+        {
+          score += 2;
+          note.push(`following ${account1}`);
+        }
+        else if (followers2.has(account.url))
+        {
+          score += 2;
+          note.push(`following ${account2}`);
+        }
+
+        accepted.push({
+          score,
+          sortKey: (account.display_name || account.acct).toLowerCase(),
+          note: note.join(", "),
+          account
+        });
+      }
+
+      accepted.sort((a, b) =>
+      {
+        if (a.score != b.score)
+          return b.score - a.score;
+        else if (a.sortKey < b.sortKey)
+          return -1;
+        else if (a.sortKey > b.sortKey)
+          return 1;
+        return 0;
+      });
+
+      let output = document.getElementById("result");
+      if (accepted.length)
+      {
+        output.innerText = "";
+        for (let {account, note} of accepted)
+        {
+          let template = document.getElementById("account").content.cloneNode(true);
+          template.querySelector(".account").href = makeValidUrl(account.url);
+
+          template.querySelector(".avatar").src = makeValidUrl(account.avatar);
+
+          if (account.display_name)
+            template.querySelector(".name").textContent = account.display_name;
+
+          let acct = account.acct;
+          if (!acct.includes("@"))
+            acct += "@" + new URL(account.url).hostname;
+          template.querySelector(".id").textContent = acct;
+
+          template.querySelector(".note").textContent = note;
+
+          output.appendChild(template);
+        }
+      }
+      else
+        output.innerText = "No bubble intersections found.";
+    }
+
+    let comparing = false;
+    async function doCompare()
+    {
+      if (comparing)
+        return;
+
+      comparing = true;
+      document.getElementById("submit").disabled = true;
+      document.getElementById("progress").classList.remove("done");
+      try
+      {
+        let account1 = document.getElementById("account1").value;
+        let account2 = document.getElementById("account2").value;
+        if (account1 == account2)
+          throw "Please enter two different accounts.";
+
+        setProgress(`Resolving account ${account1}.`);
+        let {user: user1, host: host1} = await resolveAccount(account1);
+        let id1 = (await apiCall(host1, `accounts/lookup?acct=${encodeURIComponent(user1)}`)).id;
+
+        setProgress(`Resolving account ${account2}.`);
+        let {user: user2, host: host2} = await resolveAccount(account2);
+        let id2 = (await apiCall(host2, `accounts/lookup?acct=${encodeURIComponent(user2)}`)).id;
+
+        if (host1 == host2 && id1 == id2)
+          throw `Accounts ${account1} and ${account2} both resolve to the same account.`;
+
+        setProgress(`Fetching ${account1} followees.`);
+        let followees1 = await apiCall(host1, `accounts/${encodeURIComponent(id1)}/following?limit=100`);
+
+        setProgress(`Fetching ${account1} followers.`);
+        let followers1 = await apiCall(host1, `accounts/${encodeURIComponent(id1)}/followers?limit=100`);
+
+        setProgress(`Fetching ${account2} followees.`);
+        let followees2 = await apiCall(host2, `accounts/${encodeURIComponent(id2)}/following?limit=100`);
+
+        setProgress(`Fetching ${account2} followers.`);
+        let followers2 = await apiCall(host2, `accounts/${encodeURIComponent(id2)}/followers?limit=100`);
+
+        compareLists(followees1, followers1, followees2, followers2, account1, account2);
+      }
+      catch (e)
+      {
+        setError(e.toString());
+        if (typeof e != "string")
+          console.error(e);
+      }
+      finally
+      {
+        comparing = false;
+        document.getElementById("submit").disabled = false;
+        document.getElementById("progress").classList.add("done");
+      }
+    }
+  </script>
+
+  <style>
+    html, body
+    {
+      background-color: white;
+    }
+
+    html, body, input, button, a
+    {
+      color: black;
+      font-family: sans-serif;
+      font-size: 16px;
+      text-decoration: none;
+    }
+
+    form
+    {
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 10px;
+    }
+
+    input
+    {
+      width: 400px;
+    }
+
+    p:first-child
+    {
+      margin-top: 0;
+    }
+
+    p:last-child
+    {
+      margin-bottom: 0;
+    }
+  
+    #progress
+    {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+    }
+  
+    #progress.done:not(.error)
+    {
+      display: none;
+    }
+  
+    #progress.error
+    {
+      color: red;
+    }
+
+    #progress.error > #in-progress
+    {
+      display: none;
+    }
+  
+    #progress:not(.error) > #error
+    {
+      display: none;
+    }
+  
+    #progress-label
+    {
+      margin-inline-start: 1em;
+    }
+  
+    .account
+    {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      padding: 0.5em 0;
+    }
+
+    .account:not(:first-child)
+    {
+      border-top: 1px solid #ccc;
+    }
+
+    .account > .avatar
+    {
+      max-width: 46px;
+      max-height: 46px;
+      border-radius: 4px;
+      margin-inline-end: 1em;
+    }
+
+    .account > .name-container
+    {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .account .name
+    {
+      font-weight: bold;
+    }
+
+    .account .note
+    {
+      font-size: 80%;
+    }
+</style>
+</head>
+<body onload="restore()">
+  <p>Twitter shows you “Followers you know” when looking at an account. Mastodon doesn’t, for a good reason. Your decision to follow someone shouldn’t depend on group pressure.</p>
+  <p>For vulnerable groups this feature serves another purpose however: when dealing with toxic accounts, it shows who in your own bubble you should be wary of.</p>
+  <p>Luckily, Mastodon provides a public API that allows easily reproducing this functionality. Enter your account handle, enter other account’s handle, compare your bubbles.</p>
+  <p>
+    Caveats:
+  </p>
+  <ul>
+    <li>This only works with Mastodon accounts, not with any other Fediverse servers.</li>
+    <li>No comparison is possible if any of the accounts hides their social graph.</li>
+  </ul>
+  <form action="#" onsubmit="doCompare();return false">
+    <p>
+      Please enter accounts to compare:
+    </p>
+    <p>
+      Account 1: <input id="account1" type="text" placeholder="@me@example.social" pattern="^@?[^@]+@[^@]+\.[^@]+$" required oninput="save(this)">
+    </p>
+    <p>
+      Account 2: <input id="account2" type="text" placeholder="@them@example.lol" pattern="^@?[^@]+@[^@]+\.[^@]+$" required oninput="save(this)">
+    </p>
+    <p>
+      <button id="submit" type="submit">Compare bubbles</button>
+    </p>
+  </form>
+
+  <p id="progress" class="done">
+    <img id="in-progress" src="data:;base64,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">
+    <svg id="error" width="32" height="32" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg"><path fill="none" d="M0 0h500v500H0z"/><path fill="none" d="M0 0h500v500H0z"/><g transform="translate(0 10.355)"><circle cx="250" cy="242.86" r="169.19" fill="#eb2323"/><circle cx="250" cy="236.43" r="169.19" fill="#ff3b3b"/><path d="M150.56 164.51v6l13.762 13.762 58.158 58.158-71.92 65.918v6l27.521 27.521 71.918-71.918 71.92 71.918 27.521-27.521v-6l-71.92-65.918 58.158-58.158 13.762-13.762v-6l-99.441 50.399z" color="#000" fill="#e9e9e9" fill-rule="evenodd" style="block-progression:tb;isolation:auto;mix-blend-mode:normal;text-decoration-color:#000;text-decoration-line:none;text-decoration-style:solid;text-indent:0;text-transform:none;white-space:normal"/><path d="m178.08 136.99-27.523 27.523 13.762 13.762 58.158 58.158-4.978 4.979-66.941 66.938 27.52 27.521 71.919-71.917 71.92 71.918 27.52-27.521-66.94-66.94-4.979-4.978 58.158-58.158 13.762-13.762-27.523-27.523-.002.006-13.764 13.762-58.152 58.154-58.15-58.154-13.764-13.762-.002-.006z" color="#000" fill="#fff" fill-rule="evenodd" style="block-progression:tb;isolation:auto;mix-blend-mode:normal;text-decoration-color:#000;text-decoration-line:none;text-decoration-style:solid;text-indent:0;text-transform:none;white-space:normal"/></g></svg>
+    <span id="progress-label"></span>
+  </p>
+
+  <template id="account">
+    <a class="account">
+      <img class="avatar">
+      <span class="name-container">
+        <span class="name"></span>
+        <span class="id"></span>
+        <span class="note"></span>
+      </span>
+    </a>
+  </template>
+
+  <div id="result"></div>
+</body>
+</html>
