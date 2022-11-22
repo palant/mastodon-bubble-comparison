@@ -69,7 +69,9 @@ async function apiCall(host, path)
   let result = null;
   do
   {
-    let response = await fetch(url);
+    let response = await fetch(url, {
+      credentials: "omit",
+    });
     if (result)
       result.push(...await response.json());
     else
@@ -108,7 +110,18 @@ async function resolveAccount(account)
   if (!response.subject || !response.subject.startsWith(prefix))
     throw `Unexpected response resolving account ${account}`;
 
-  return parseAccountName(response.subject.slice(prefix.length));
+  let result = parseAccountName(response.subject.slice(prefix.length));
+  if (response.aliases && response.aliases.length)
+  {
+    try
+    {
+      result.host = new URL(response.aliases[0]).hostname || result.host;
+    }
+    catch (e)
+    {
+    }
+  }
+  return result;
 }
 
 function listToMap(list)
