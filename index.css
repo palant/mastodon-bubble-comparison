@@ -3,7 +3,7 @@ html, body
   background-color: white;
 }
 
-html, body, input, button, a
+html, body, input, button, a.account
 {
   color: black;
   font-family: sans-serif;
